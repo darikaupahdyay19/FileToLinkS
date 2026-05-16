@@ -16,6 +16,7 @@ class Database:
         self.token_col: AsyncIOMotorCollection = self.db.tokens
         self.authorized_users_col: AsyncIOMotorCollection = self.db.authorized_users
         self.restart_message_col: AsyncIOMotorCollection = self.db.restart_message
+        self.settings_col: AsyncIOMotorCollection = self.db.bot_settings
 
     async def ensure_indexes(self):
         try:
@@ -28,6 +29,7 @@ class Database:
             await self.token_col.create_index("activated")
             await self.restart_message_col.create_index("message_id", unique=True)
             await self.restart_message_col.create_index("timestamp", expireAfterSeconds=3600)
+            await self.settings_col.create_index("key", unique=True)
 
             logger.debug("Database indexes ensured.")
         except Exception as e:
@@ -205,6 +207,32 @@ class Database:
             logger.debug(f"Deleted restart message {message_id}.")
         except Exception as e:
             logger.error(f"Error deleting restart message {message_id}: {e}", exc_info=True)
+
+    async def get_setting(self, key: str, default: Any = None) -> Any:
+        try:
+            doc = await self.settings_col.find_one({"key": key})
+            if not doc:
+                return default
+            return doc.get("value", default)
+        except Exception as e:
+            logger.error(f"Error in get_setting for key {key}: {e}", exc_info=True)
+            return default
+
+    async def set_setting(self, key: str, value: Any, updated_by: Optional[int] = None) -> None:
+        try:
+            await self.settings_col.update_one(
+                {"key": key},
+                {"$set": {
+                    "value": value,
+                    "updated_at": datetime.datetime.utcnow(),
+                    "updated_by": updated_by,
+                }},
+                upsert=True,
+            )
+            logger.debug(f"Setting {key!r} updated to {value!r} by {updated_by}.")
+        except Exception as e:
+            logger.error(f"Error in set_setting for key {key}: {e}", exc_info=True)
+            raise
 
     async def close(self):
         if self._client:

@@ -140,3 +140,39 @@ async def owner_only(client, update):
         except Exception as inner_e:
             logger.error(f"Failed to send error answer in owner_only: {inner_e}", exc_info=True)
         return False
+
+
+
+async def check_public_access(client, message: Message) -> bool:
+    """
+    Silent gate that runs BEFORE any other check on user-facing handlers.
+
+    - If public mode is ON  -> returns True (allow all).
+    - If public mode is OFF -> returns True only for OWNER and authorized
+      users; for everyone else returns False WITHOUT sending any reply,
+      so the bot looks completely silent / non-existent to them.
+    """
+    try:
+        # Local import to avoid a circular import at module load time
+        # (access -> tokens -> database -> ... is fine, but decorators is
+        # imported very early, so we keep this lazy).
+        from KPS.utils.access import can_use_bot
+
+        user_id = message.from_user.id if message.from_user else None
+        if await can_use_bot(user_id):
+            return True
+
+        logger.debug(
+            f"Silently dropping message from user {user_id} "
+            f"(public mode OFF, not in allow-list)."
+        )
+        return False
+    except Exception as e:
+        logger.error(f"Error in check_public_access: {e}", exc_info=True)
+        # Fail-closed: when public mode lookup fails, do not leak the bot's
+        # existence to potentially-restricted users. Owners always pass.
+        try:
+            from KPS.utils.access import is_owner
+            return await is_owner(message.from_user.id if message.from_user else None)
+        except Exception:
+            return False

@@ -13,8 +13,8 @@ from KPS.bot import StreamBot
 from KPS.utils.bot_utils import (gen_links, is_admin, log_newusr, notify_own,
                                      reply_user_err)
 from KPS.utils.database import db
-from KPS.utils.decorators import (check_banned, get_shortener_status,
-                                      require_token)
+from KPS.utils.decorators import (check_banned, check_public_access,
+                                      get_shortener_status, require_token)
 from KPS.utils.force_channel import force_channel_check
 from KPS.utils.handler import handle_flood_wait
 from KPS.utils.logger import logger
@@ -55,6 +55,8 @@ def get_link_buttons(links):
     ]])
 
 async def validate_request_common(client: Client, message: Message) -> Optional[bool]:
+    if not await check_public_access(client, message):
+        return None
     if not await check_banned(client, message):
         return None
     if not await require_token(client, message):
@@ -224,6 +226,8 @@ async def private_receive_handler(bot: Client, msg: Message, **kwargs):
 async def channel_receive_handler(bot: Client, msg: Message):
     async def _actual_channel_receive_handler(client: Client, message: Message, **handler_kwargs):
         if not Var.CHANNEL:
+            return
+        if not await check_public_access(client, message):
             return
         notification_msg = handler_kwargs.get('notification_msg')
 

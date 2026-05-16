@@ -102,3 +102,10 @@ class Var:
     MAX_FILES_PER_PERIOD: int = int(os.getenv("MAX_FILES_PER_PERIOD", "2"))
     RATE_LIMIT_PERIOD_MINUTES: int = int(os.getenv("RATE_LIMIT_PERIOD_MINUTES", "1"))
     MAX_QUEUE_SIZE: int = int(os.getenv("MAX_QUEUE_SIZE", "100"))
+
+    # Public usage mode. When True, anyone can use the bot.
+    # When False, only OWNER + authorized users (added via /authorize) can use it;
+    # everyone else is silently ignored (the bot will not even reply).
+    # This value seeds the DB on first run; afterwards the runtime state is
+    # controlled via the /publicmode command and persisted in the database.
+    PUBLIC_MODE: bool = str_to_bool(os.getenv("PUBLIC_MODE", "True"))

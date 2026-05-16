@@ -23,7 +23,8 @@ def get_commands():
         "users": "(Admin) Show the total number of users",
         "authorize": "(Admin) Grant permanent access to a user",
         "deauthorize": "(Admin) Remove permanent access from a user",
-        "listauth": "(Admin) List all authorized users"
+        "listauth": "(Admin) List all authorized users",
+        "publicmode": "(Admin) Toggle public usage on/off"
     }
     return [BotCommand(name, desc) for name, desc in command_descriptions.items()]
 

@@ -33,6 +33,9 @@ from KPS.utils.messages import (
     MSG_DEAUTHORIZE_USAGE, MSG_ERROR_GENERIC, MSG_INVALID_USER_ID,
     MSG_LOG_FILE_CAPTION, MSG_LOG_FILE_EMPTY, MSG_LOG_FILE_MISSING,
     MSG_NO_AUTH_USERS, MSG_RESTARTING, MSG_SHELL_ERROR,
+    MSG_PUBLIC_MODE_STATUS, MSG_PUBLIC_MODE_USAGE,
+    MSG_PUBLIC_MODE_ENABLED, MSG_PUBLIC_MODE_DISABLED,
+    MSG_PUBLIC_MODE_UNCHANGED,
     MSG_SHELL_EXECUTING, MSG_SHELL_NO_OUTPUT, MSG_SHELL_OUTPUT,
     MSG_SHELL_OUTPUT_STDERR, MSG_SHELL_OUTPUT_STDOUT, MSG_SHELL_USAGE,
     MSG_STATUS_ERROR, MSG_SYSTEM_STATS, MSG_SYSTEM_STATUS,
@@ -42,6 +45,7 @@ from KPS.utils.messages import (
 )
 from KPS.utils.time_format import get_readable_time
 from KPS.utils.tokens import authorize, deauthorize, list_allowed
+from KPS.utils.access import is_public_mode, set_public_mode
 from KPS.vars import Var
 
 owner_filter = filters.private & filters.user(Var.OWNER_ID)
@@ -353,3 +357,61 @@ async def run_shell_command(client: Client, message: Message):
                 message,
                 text=MSG_SHELL_ERROR.format(error=html.escape(str(e))),
                 parse_mode=ParseMode.HTML)
+
+
+
+@StreamBot.on_message(filters.command("publicmode") & owner_filter)
+async def public_mode_command(client: Client, message: Message):
+    """
+    /publicmode               -> show current state
+    /publicmode on | enable   -> enable public usage (anyone may use)
+    /publicmode off | disable -> disable public usage (only owner +
+                                  authorized users may use the bot;
+                                  everyone else is silently ignored)
+    /publicmode toggle        -> flip the current state
+    """
+    try:
+        current = await is_public_mode()
+
+        if len(message.command) == 1:
+            return await reply(
+                message,
+                text=MSG_PUBLIC_MODE_STATUS.format(
+                    state="ON ✅ (public)" if current else "OFF 🔒 (restricted)"
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+        arg = message.command[1].strip().lower()
+        on_words = {"on", "enable", "enabled", "true", "1", "yes", "public"}
+        off_words = {"off", "disable", "disabled", "false", "0", "no", "private", "restrict", "restricted"}
+
+        if arg in on_words:
+            target = True
+        elif arg in off_words:
+            target = False
+        elif arg in {"toggle", "flip"}:
+            target = not current
+        else:
+            return await reply(message, text=MSG_PUBLIC_MODE_USAGE, parse_mode=ParseMode.MARKDOWN)
+
+        if target == current:
+            state_str = "ON ✅ (public)" if current else "OFF 🔒 (restricted)"
+            return await reply(
+                message,
+                text=MSG_PUBLIC_MODE_UNCHANGED.format(state=state_str),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+        await set_public_mode(
+            target,
+            updated_by=message.from_user.id if message.from_user else None,
+        )
+        await reply(
+            message,
+            text=(MSG_PUBLIC_MODE_ENABLED if target else MSG_PUBLIC_MODE_DISABLED),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as e:
+        logger.error(f"Error in public_mode_command: {e}", exc_info=True)
+        await reply(message, text=MSG_ERROR_GENERIC)

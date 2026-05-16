@@ -11,7 +11,7 @@ from KPS.bot import StreamBot
 from KPS.utils.bot_utils import (gen_dc_txt, get_user, log_newusr,
                                      reply_user_err)
 from KPS.utils.database import db
-from KPS.utils.decorators import check_banned
+from KPS.utils.decorators import check_banned, check_public_access
 from KPS.utils.file_properties import get_fname, get_fsize, parse_fid
 from KPS.utils.force_channel import force_channel_check, get_force_info
 from KPS.utils.handler import handle_flood_wait
@@ -32,6 +32,8 @@ from KPS.vars import Var
 
 @StreamBot.on_message(filters.command("start") & filters.private)
 async def start_command(bot: Client, msg: Message):
+    if not await check_public_access(bot, msg):
+        return
     if not await check_banned(bot, msg):
         return
     user = msg.from_user
@@ -90,6 +92,8 @@ async def start_command(bot: Client, msg: Message):
 
 @StreamBot.on_message(filters.command("help") & filters.private)
 async def help_command(bot: Client, msg: Message):
+    if not await check_public_access(bot, msg):
+        return
     if not await check_banned(bot, msg):
         return
     if msg.from_user:
@@ -107,6 +111,8 @@ async def help_command(bot: Client, msg: Message):
 
 @StreamBot.on_message(filters.command("about") & filters.private)
 async def about_command(bot: Client, msg: Message):
+    if not await check_public_access(bot, msg):
+        return
     if not await check_banned(bot, msg):
         return
     if msg.from_user:
@@ -169,6 +175,8 @@ async def send_file_dc(msg: Message, file_msg: Message):
 
 @StreamBot.on_message(filters.command("dc"))
 async def dc_command(bot: Client, msg: Message):
+    if not await check_public_access(bot, msg):
+        return
     if not await check_banned(bot, msg):
         return
     if not await force_channel_check(bot, msg):
@@ -202,6 +210,8 @@ async def dc_command(bot: Client, msg: Message):
 
 @StreamBot.on_message(filters.command("ping") & filters.private)
 async def ping_command(bot: Client, msg: Message):
+    if not await check_public_access(bot, msg):
+        return
     if not await check_banned(bot, msg):
         return
     if not await force_channel_check(bot, msg):
