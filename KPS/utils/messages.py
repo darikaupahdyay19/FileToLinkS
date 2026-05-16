@@ -117,6 +117,32 @@ MSG_LOG_FILE_CAPTION = "📄 **System Logs**"
 MSG_LOG_FILE_EMPTY = "ℹ️ **Log File Empty:** No data found in the log file."
 MSG_LOG_FILE_MISSING = "⚠️ **Log File Missing:** Could not find the log file."
 
+# ------ Public Mode ------
+MSG_PUBLIC_MODE_STATUS = (
+    "🌐 **Public Mode Status**\n\n"
+    "> Current state: **{state}**\n\n"
+    "Use `/publicmode on` or `/publicmode off` to change."
+)
+MSG_PUBLIC_MODE_USAGE = (
+    "⚙️ **Usage:**\n"
+    "> `/publicmode` — show current state\n"
+    "> `/publicmode on` — allow everyone to use the bot\n"
+    "> `/publicmode off` — restrict to owner & authorized users only\n"
+    "> `/publicmode toggle` — flip the current state"
+)
+MSG_PUBLIC_MODE_ENABLED = (
+    "✅ **Public Mode: ON**\n\n"
+    "> Anyone can now use the bot."
+)
+MSG_PUBLIC_MODE_DISABLED = (
+    "🔒 **Public Mode: OFF**\n\n"
+    "> Only **owner** and **authorized users** (added via `/authorize`) can use the bot.\n"
+    "> Everyone else will be silently ignored — they will receive **no reply at all**."
+)
+MSG_PUBLIC_MODE_UNCHANGED = (
+    "ℹ️ **No change.** Public mode is already **{state}**."
+)
+
 # =====================================================================================
 # ====== BUTTON TEXTS (User-facing) ======
 # =====================================================================================
