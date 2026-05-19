@@ -1,7 +1,9 @@
 # KPS/server/stream_routes.py
 
+import asyncio
 import re
 import secrets
+import subprocess
 import time
 from urllib.parse import quote, unquote
 
@@ -12,6 +14,7 @@ from KPS.bot import StreamBot, multi_clients, work_loads
 from KPS.server.exceptions import FileNotFound, InvalidHash
 from KPS.utils.custom_dl import ByteStreamer
 from KPS.utils.logger import logger
+from KPS.utils.probe import probe_tracks
 from KPS.utils.render_template import render_page
 from KPS.utils.time_format import get_readable_time
 
@@ -27,6 +30,11 @@ PATTERN_ID_FIRST = re.compile(r"^(\d+)(?:/.*)?$")
 VALID_HASH_REGEX = re.compile(r'^[a-zA-Z0-9_-]+$')
 
 streamers = {}
+
+# In-memory cache for extracted WebVTT subtitles:
+# {(message_id, secure_hash, subtitle_index): bytes}
+_subtitle_cache: dict[tuple[int, str, int], bytes] = {}
+_subtitle_locks: dict[tuple[int, str, int], asyncio.Lock] = {}
 
 
 def get_streamer(client_id: int) -> ByteStreamer:
@@ -165,6 +173,389 @@ async def media_preview(request: web.Request):
         logger.error(f"Preview error {error_id}: {e}", exc_info=True)
         raise web.HTTPInternalServerError(
             text=f"Server error occurred: {error_id}") from e
+
+
+@routes.get(r"/api/tracks/MRVIOLETSTREAMBOT-{path:.+}")
+async def media_tracks(request: web.Request):
+    """Return audio/video/subtitle tracks for a media file as JSON."""
+    try:
+        path = request.match_info["path"]
+        message_id, secure_hash = parse_media_request(path, request.query)
+
+        client_id, streamer = select_optimal_client()
+        work_loads[client_id] += 1
+        try:
+            file_info = await streamer.get_file_info(message_id)
+            if not file_info.get('unique_id'):
+                raise FileNotFound("File unique ID not found in info.")
+            if file_info['unique_id'][:SECURE_HASH_LENGTH] != secure_hash:
+                raise InvalidHash(
+                    "Provided hash does not match file's unique ID.")
+
+            file_size = file_info.get('file_size', 0)
+            if file_size == 0:
+                raise FileNotFound(
+                    "File size is reported as zero or unavailable.")
+
+            tracks = await probe_tracks(
+                streamer, message_id, secure_hash, file_size)
+            return web.json_response(tracks)
+        finally:
+            work_loads[client_id] -= 1
+
+    except (InvalidHash, FileNotFound) as e:
+        logger.debug(
+            f"Client error in /api/tracks: {type(e).__name__} - {e}",
+            exc_info=True)
+        raise web.HTTPNotFound(text="Resource not found") from e
+    except Exception as e:
+        error_id = secrets.token_hex(6)
+        logger.error(f"/api/tracks error {error_id}: {e}", exc_info=True)
+        raise web.HTTPInternalServerError(
+            text=f"Server error occurred: {error_id}") from e
+
+
+@routes.get(r"/remux/MRVIOLETSTREAMBOT-{path:.+}")
+async def media_remux(request: web.Request):
+    """Stream the file remuxed with a selected audio track (FFmpeg -c copy).
+
+    Query params:
+        audio: zero-based audio stream index (default 0)
+    """
+    try:
+        path = request.match_info["path"]
+        message_id, secure_hash = parse_media_request(path, request.query)
+
+        try:
+            audio_track = int(request.query.get("audio", "0"))
+        except ValueError:
+            raise web.HTTPBadRequest(text="Invalid 'audio' query parameter")
+        if audio_track < 0 or audio_track > 31:
+            raise web.HTTPBadRequest(text="audio index out of range")
+
+        client_id, streamer = select_optimal_client()
+        work_loads[client_id] += 1
+
+        try:
+            file_info = await streamer.get_file_info(message_id)
+            if not file_info.get('unique_id'):
+                raise FileNotFound("File unique ID not found in info.")
+            if file_info['unique_id'][:SECURE_HASH_LENGTH] != secure_hash:
+                raise InvalidHash(
+                    "Provided hash does not match file's unique ID.")
+
+            file_size = file_info.get('file_size', 0)
+            if file_size == 0:
+                raise FileNotFound(
+                    "File size is reported as zero or unavailable.")
+
+            filename = (
+                file_info.get('file_name') or f"file_{secrets.token_hex(4)}")
+            base_name = (
+                filename.rsplit('.', 1)[0] if '.' in filename else filename)
+            remux_filename = f"{base_name}.mp4"
+
+            headers = {
+                "Content-Type": "video/mp4",
+                "Content-Disposition":
+                    f"inline; filename*=UTF-8''{quote(remux_filename)}",
+                "Cache-Control": "no-cache",
+                "Accept-Ranges": "none",
+                "Connection": "keep-alive",
+            }
+
+            response = web.StreamResponse(status=200, headers=headers)
+            await response.prepare(request)
+
+            try:
+                await _pipe_remux(
+                    streamer, message_id, file_size, audio_track, response)
+            finally:
+                try:
+                    await response.write_eof()
+                except (ConnectionResetError, asyncio.CancelledError):
+                    pass
+            return response
+        finally:
+            work_loads[client_id] -= 1
+
+    except web.HTTPException:
+        raise
+    except (InvalidHash, FileNotFound) as e:
+        logger.debug(
+            f"Client error in /remux: {type(e).__name__} - {e}",
+            exc_info=True)
+        raise web.HTTPNotFound(text="Resource not found") from e
+    except Exception as e:
+        error_id = secrets.token_hex(6)
+        logger.error(f"/remux error {error_id}: {e}", exc_info=True)
+        raise web.HTTPInternalServerError(
+            text=f"Server error occurred: {error_id}") from e
+
+
+@routes.get(r"/sub/MRVIOLETSTREAMBOT-{path:.+}")
+async def media_subtitle(request: web.Request):
+    """Extract the Nth subtitle stream as WebVTT for use in a <track>.
+
+    Query params:
+        subtitle: zero-based subtitle stream index (default 0)
+    """
+    try:
+        path = request.match_info["path"]
+        message_id, secure_hash = parse_media_request(path, request.query)
+
+        try:
+            sub_track = int(request.query.get("subtitle", "0"))
+        except ValueError:
+            raise web.HTTPBadRequest(text="Invalid 'subtitle' query parameter")
+        if sub_track < 0 or sub_track > 31:
+            raise web.HTTPBadRequest(text="subtitle index out of range")
+
+        cache_key = (message_id, secure_hash, sub_track)
+        cached = _subtitle_cache.get(cache_key)
+        if cached is not None:
+            return web.Response(
+                body=cached,
+                content_type="text/vtt",
+                charset="utf-8",
+                headers={"Cache-Control": "public, max-age=3600"},
+            )
+
+        client_id, streamer = select_optimal_client()
+        work_loads[client_id] += 1
+        try:
+            file_info = await streamer.get_file_info(message_id)
+            if not file_info.get('unique_id'):
+                raise FileNotFound("File unique ID not found in info.")
+            if file_info['unique_id'][:SECURE_HASH_LENGTH] != secure_hash:
+                raise InvalidHash(
+                    "Provided hash does not match file's unique ID.")
+
+            file_size = file_info.get('file_size', 0)
+            if file_size == 0:
+                raise FileNotFound(
+                    "File size is reported as zero or unavailable.")
+
+            lock = _subtitle_locks.setdefault(cache_key, asyncio.Lock())
+            async with lock:
+                cached = _subtitle_cache.get(cache_key)
+                if cached is None:
+                    cached = await _extract_subtitle_to_vtt(
+                        streamer, message_id, file_size, sub_track)
+                    _subtitle_cache[cache_key] = cached
+            return web.Response(
+                body=cached,
+                content_type="text/vtt",
+                charset="utf-8",
+                headers={"Cache-Control": "public, max-age=3600"},
+            )
+        finally:
+            work_loads[client_id] -= 1
+
+    except web.HTTPException:
+        raise
+    except (InvalidHash, FileNotFound) as e:
+        logger.debug(
+            f"Client error in /sub: {type(e).__name__} - {e}",
+            exc_info=True)
+        raise web.HTTPNotFound(text="Resource not found") from e
+    except Exception as e:
+        error_id = secrets.token_hex(6)
+        logger.error(f"/sub error {error_id}: {e}", exc_info=True)
+        raise web.HTTPInternalServerError(
+            text=f"Server error occurred: {error_id}") from e
+
+
+async def _pipe_remux(
+    streamer: ByteStreamer,
+    message_id: int,
+    file_size: int,
+    audio_track: int,
+    response: web.StreamResponse,
+) -> None:
+    """Run ffmpeg with Telegram bytes on stdin, fragmented MP4 to client."""
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", "pipe:0",
+        "-map", "0:v:0?",
+        "-map", f"0:a:{audio_track}?",
+        "-c", "copy",
+        "-f", "mp4",
+        "-movflags",
+        "frag_keyframe+empty_moov+default_base_moof",
+        "pipe:1",
+    ]
+    logger.info(
+        "Starting ffmpeg remux: msg=%s audio=%s size=%.1fMB",
+        message_id, audio_track, file_size / 1024 / 1024,
+    )
+
+    process = await asyncio.to_thread(
+        subprocess.Popen,
+        ffmpeg_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    async def feed_ffmpeg() -> None:
+        bytes_fed = 0
+        try:
+            async for chunk in streamer.stream_file(
+                message_id, offset=0, limit=file_size
+            ):
+                if not chunk:
+                    continue
+                if process.poll() is not None:
+                    break
+                await asyncio.to_thread(process.stdin.write, bytes(chunk))
+                bytes_fed += len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            logger.warning("remux feed error msg=%s: %s", message_id, e)
+        finally:
+            try:
+                if process.poll() is None:
+                    process.stdin.close()
+            except Exception:
+                pass
+            logger.debug(
+                "remux feed done msg=%s fed=%.1fMB",
+                message_id, bytes_fed / 1024 / 1024,
+            )
+
+    feed_task = asyncio.create_task(feed_ffmpeg())
+
+    bytes_sent = 0
+    read_size = 256 * 1024
+    try:
+        while True:
+            chunk = await asyncio.to_thread(process.stdout.read, read_size)
+            if not chunk:
+                break
+            try:
+                await response.write(chunk)
+            except (ConnectionResetError, asyncio.CancelledError):
+                break
+            bytes_sent += len(chunk)
+    finally:
+        feed_task.cancel()
+        try:
+            if process.poll() is None:
+                process.kill()
+            await asyncio.to_thread(process.wait, 5)
+        except Exception:
+            pass
+        if process.returncode not in (None, 0):
+            stderr = b""
+            try:
+                stderr = process.stderr.read() or b""
+            except Exception:
+                pass
+            logger.warning(
+                "ffmpeg exited %s msg=%s: %s",
+                process.returncode,
+                message_id,
+                stderr.decode(errors='replace')[:500],
+            )
+        try:
+            await feed_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        logger.info(
+            "remux done msg=%s sent=%.1fMB",
+            message_id, bytes_sent / 1024 / 1024,
+        )
+
+
+async def _extract_subtitle_to_vtt(
+    streamer: ByteStreamer,
+    message_id: int,
+    file_size: int,
+    subtitle_index: int,
+) -> bytes:
+    """Pipe Telegram bytes through ffmpeg to extract one subtitle as WebVTT."""
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", "pipe:0",
+        "-map", f"0:s:{subtitle_index}",
+        "-c:s", "webvtt",
+        "-f", "webvtt",
+        "pipe:1",
+    ]
+    logger.info(
+        "Starting subtitle extraction: msg=%s sub=%s size=%.1fMB",
+        message_id, subtitle_index, file_size / 1024 / 1024,
+    )
+
+    process = await asyncio.to_thread(
+        subprocess.Popen,
+        ffmpeg_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    async def feed_ffmpeg() -> None:
+        try:
+            async for chunk in streamer.stream_file(
+                message_id, offset=0, limit=file_size
+            ):
+                if not chunk:
+                    continue
+                if process.poll() is not None:
+                    break
+                await asyncio.to_thread(process.stdin.write, bytes(chunk))
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            logger.warning("sub feed error msg=%s: %s", message_id, e)
+        finally:
+            try:
+                if process.poll() is None:
+                    process.stdin.close()
+            except Exception:
+                pass
+
+    feed_task = asyncio.create_task(feed_ffmpeg())
+    try:
+        stdout = await asyncio.to_thread(process.stdout.read)
+    finally:
+        try:
+            await feed_task
+        except Exception:
+            pass
+        try:
+            if process.poll() is None:
+                process.kill()
+            await asyncio.to_thread(process.wait, 5)
+        except Exception:
+            pass
+
+    if process.returncode not in (None, 0):
+        stderr = b""
+        try:
+            stderr = process.stderr.read() or b""
+        except Exception:
+            pass
+        logger.warning(
+            "subtitle ffmpeg exited %s msg=%s: %s",
+            process.returncode,
+            message_id,
+            stderr.decode(errors='replace')[:500],
+        )
+
+    if not stdout:
+        # Always return a valid (empty) WebVTT so the <track> doesn't 500.
+        return b"WEBVTT\n\n"
+    return stdout
 
 
 @routes.get(r"/MRVIOLETSTREAMBOT-{path:.+}", allow_head=True)

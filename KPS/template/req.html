@@ -30,6 +30,99 @@
 
     <!-- Main Stylesheet -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/fyaz05/Resources@main/FileToLink/style.css">
+
+    <style>
+        /* Audio / Subtitle track selector */
+        .track-selectors {
+            display: none;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin: 1rem 0;
+        }
+        .track-selectors.visible { display: flex; }
+        .track-selector {
+            flex: 1 1 220px;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.6rem 0.9rem;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 0.85rem;
+            backdrop-filter: blur(8px);
+        }
+        .track-selector .track-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #6366f1, #a855f7);
+            color: #fff;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+        }
+        .track-selector .track-meta { flex: 0 0 auto; }
+        .track-selector .track-label {
+            display: block;
+            font-size: 0.7rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: rgba(255,255,255,0.5);
+            line-height: 1;
+        }
+        .track-selector select {
+            flex: 1 1 auto;
+            min-width: 0;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.12);
+            color: inherit;
+            padding: 0.45rem 1.8rem 0.45rem 0.7rem;
+            border-radius: 0.55rem;
+            font: inherit;
+            font-size: 0.85rem;
+            cursor: pointer;
+            outline: none;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 0.6rem center;
+        }
+        .track-selector select:hover { border-color: rgba(99,102,241,0.5); }
+        .track-selector select:focus { border-color: #6366f1; }
+        .track-selector select option {
+            background: #1a1a2e;
+            color: #fff;
+        }
+        .track-selector select:disabled { opacity: 0.5; cursor: not-allowed; }
+        html[data-theme="light"] .track-selector {
+            background: rgba(0,0,0,0.03);
+            border-color: rgba(0,0,0,0.08);
+        }
+        html[data-theme="light"] .track-selector select {
+            background-color: rgba(0,0,0,0.04);
+            border-color: rgba(0,0,0,0.12);
+        }
+        html[data-theme="light"] .track-selector select option { background: #fff; color: #1a1a2e; }
+        html[data-theme="light"] .track-selector .track-label { color: rgba(0,0,0,0.55); }
+        html[data-theme="light"] .track-selector select { color: #1a1a2e; }
+        .remux-notice {
+            display: none;
+            margin: 0.25rem 0 1rem;
+            padding: 0.55rem 0.9rem;
+            background: rgba(234,179,8,0.08);
+            border: 1px solid rgba(234,179,8,0.18);
+            color: rgba(234,179,8,0.95);
+            border-radius: 0.65rem;
+            font-size: 0.8rem;
+            gap: 0.5rem;
+            align-items: center;
+        }
+        .remux-notice.visible { display: flex; }
+    </style>
 </head>
 <body>
     <button class="theme-toggle button-base" aria-label="Toggle Light/Dark Mode" aria-pressed="false" title="Toggle Light/Dark Mode">
@@ -50,11 +143,32 @@
 
         <main id="main-content">
             <section class="player-container" aria-label="Video Player">
-                <video id="player" playsinline preload="metadata" controlsList="nodownload" aria-label="Video player">
-                    <source src="{{ src }}" type="video/mp4" />
+                <video id="player" playsinline preload="metadata" controlsList="nodownload" crossorigin="anonymous" aria-label="Video player">
+                    <source id="video-source" src="{{ src }}" type="video/mp4" />
                     <p>Your browser does not support the video tag. Please <a href="{{ src }}" download>download the video</a> instead.</p>
                 </video>
             </section>
+
+            <div id="track-selectors" class="track-selectors" aria-label="Audio and subtitle track selection">
+                <div id="audio-selector-wrap" class="track-selector" hidden>
+                    <div class="track-icon" aria-hidden="true"><i class="fas fa-language"></i></div>
+                    <div class="track-meta"><span class="track-label">Audio</span></div>
+                    <select id="audio-track-select" aria-label="Audio track">
+                        <option value="-1">Original</option>
+                    </select>
+                </div>
+                <div id="subtitle-selector-wrap" class="track-selector" hidden>
+                    <div class="track-icon" aria-hidden="true"><i class="fas fa-closed-captioning"></i></div>
+                    <div class="track-meta"><span class="track-label">Subtitles</span></div>
+                    <select id="subtitle-track-select" aria-label="Subtitle track">
+                        <option value="-1">Off</option>
+                    </select>
+                </div>
+            </div>
+            <div id="remux-notice" class="remux-notice" role="status" aria-live="polite">
+                <i class="fas fa-info-circle" aria-hidden="true"></i>
+                <span>Playing with selected audio via server remux. Seeking may be limited.</span>
+            </div>
 
             <nav class="controls-section" aria-label="File options">
                 <div class="dropdown-container" id="stream-dropdown-container">
@@ -148,5 +262,163 @@
 
     <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js" defer></script>
     <script src="https://cdn.jsdelivr.net/gh/fyaz05/Resources@main/FileToLink/script.js" defer></script>
+
+    <script>
+    (function () {
+        const STREAM_URL = {{ src|tojson }};
+        // Derive sibling endpoints from the stream URL by inserting the
+        // route prefix before `MRVIOLETSTREAMBOT-`.
+        function withPrefix(prefix) {
+            return STREAM_URL.replace('/MRVIOLETSTREAMBOT-', '/' + prefix + '/MRVIOLETSTREAMBOT-');
+        }
+        const TRACKS_URL = withPrefix('api/tracks');
+        const REMUX_BASE = withPrefix('remux');
+        const SUB_BASE = withPrefix('sub');
+        const ORIGINAL_MIME = 'video/mp4';
+
+        const videoEl = document.getElementById('player');
+        const sourceEl = document.getElementById('video-source');
+        const audioWrap = document.getElementById('audio-selector-wrap');
+        const audioSel = document.getElementById('audio-track-select');
+        const subtitleWrap = document.getElementById('subtitle-selector-wrap');
+        const subtitleSel = document.getElementById('subtitle-track-select');
+        const selectorsRow = document.getElementById('track-selectors');
+        const remuxNotice = document.getElementById('remux-notice');
+
+        let currentAudio = -1;
+        let tracksData = null;
+
+        function setSourceUrl(url, mime) {
+            sourceEl.src = url;
+            if (mime) sourceEl.type = mime;
+        }
+
+        function clearSubtitleTracks() {
+            const old = videoEl.querySelectorAll('track[data-managed="1"]');
+            old.forEach((t) => t.remove());
+        }
+
+        function applySubtitleTrack(idx, label, langCode) {
+            clearSubtitleTracks();
+            if (idx < 0) return;
+            const t = document.createElement('track');
+            t.kind = 'subtitles';
+            t.src = SUB_BASE + '?subtitle=' + encodeURIComponent(idx);
+            t.srclang = langCode || 'und';
+            t.label = label || ('Track ' + (idx + 1));
+            t.default = true;
+            t.setAttribute('data-managed', '1');
+            videoEl.appendChild(t);
+            try {
+                Array.from(videoEl.textTracks).forEach((tt) => {
+                    tt.mode = (tt.label === t.label) ? 'showing' : 'disabled';
+                });
+            } catch (e) { /* ignore */ }
+        }
+
+        function rememberAndRestore(reloadFn) {
+            const t = videoEl.currentTime || 0;
+            const playing = !videoEl.paused;
+            reloadFn();
+            videoEl.load();
+            const onMeta = () => {
+                try { videoEl.currentTime = t; } catch (e) { /* remux may not seek */ }
+                if (playing) {
+                    const p = videoEl.play();
+                    if (p && typeof p.catch === 'function') p.catch(() => {});
+                }
+                videoEl.removeEventListener('loadedmetadata', onMeta);
+            };
+            videoEl.addEventListener('loadedmetadata', onMeta);
+        }
+
+        function onAudioChange() {
+            const idx = parseInt(audioSel.value, 10);
+            if (idx === currentAudio) return;
+            currentAudio = idx;
+            rememberAndRestore(() => {
+                if (idx === -1) {
+                    setSourceUrl(STREAM_URL, ORIGINAL_MIME);
+                    remuxNotice.classList.remove('visible');
+                } else {
+                    setSourceUrl(REMUX_BASE + '?audio=' + idx, 'video/mp4');
+                    remuxNotice.classList.add('visible');
+                }
+            });
+        }
+
+        function onSubtitleChange() {
+            const idx = parseInt(subtitleSel.value, 10);
+            if (idx === -1) {
+                clearSubtitleTracks();
+                return;
+            }
+            if (!tracksData) return;
+            const sub = (tracksData.subtitle_tracks || [])[idx];
+            if (!sub) return;
+            applySubtitleTrack(idx, sub.label, sub.language);
+        }
+
+        async function loadTracks() {
+            try {
+                const resp = await fetch(TRACKS_URL, { credentials: 'omit' });
+                if (!resp.ok) return;
+                tracksData = await resp.json();
+            } catch (e) {
+                return;
+            }
+
+            const audioTracks = (tracksData && tracksData.audio_tracks) || [];
+            const subTracks = (tracksData && tracksData.subtitle_tracks) || [];
+            let anyVisible = false;
+
+            if (audioTracks.length > 1) {
+                anyVisible = true;
+                audioSel.innerHTML = '';
+                const def = document.createElement('option');
+                def.value = '-1';
+                def.textContent = 'Original (direct, full speed)';
+                audioSel.appendChild(def);
+                audioTracks.forEach((t, i) => {
+                    const o = document.createElement('option');
+                    o.value = String(t.audio_index != null ? t.audio_index : i);
+                    o.textContent = t.label || ('Track ' + (i + 1));
+                    audioSel.appendChild(o);
+                });
+                audioWrap.hidden = false;
+                audioSel.addEventListener('change', onAudioChange);
+            }
+
+            const usableSubs = subTracks
+                .map((s, i) => Object.assign({ _idx: i }, s))
+                .filter((s) => (s.kind || 'unknown') !== 'bitmap');
+
+            if (usableSubs.length > 0) {
+                anyVisible = true;
+                subtitleSel.innerHTML = '';
+                const off = document.createElement('option');
+                off.value = '-1';
+                off.textContent = 'Off';
+                subtitleSel.appendChild(off);
+                usableSubs.forEach((s) => {
+                    const o = document.createElement('option');
+                    o.value = String(s._idx);
+                    o.textContent = s.label || ('Track ' + (s._idx + 1));
+                    subtitleSel.appendChild(o);
+                });
+                subtitleWrap.hidden = false;
+                subtitleSel.addEventListener('change', onSubtitleChange);
+            }
+
+            if (anyVisible) selectorsRow.classList.add('visible');
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', loadTracks);
+        } else {
+            loadTracks();
+        }
+    })();
+    </script>
 </body>
 </html>
