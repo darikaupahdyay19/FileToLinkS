@@ -1,7 +1,9 @@
 # KPS/server/stream_routes.py
 
+import asyncio
 import re
 import secrets
+import subprocess
 import time
 from urllib.parse import quote, unquote
 
@@ -12,8 +14,10 @@ from KPS.bot import StreamBot, multi_clients, work_loads
 from KPS.server.exceptions import FileNotFound, InvalidHash
 from KPS.utils.custom_dl import ByteStreamer
 from KPS.utils.logger import logger
+from KPS.utils.probe import probe_tracks
 from KPS.utils.render_template import render_page
 from KPS.utils.time_format import get_readable_time
+from KPS.vars import Var
 
 routes = web.RouteTableDef()
 
@@ -276,3 +280,224 @@ async def media_delivery(request: web.Request):
         logger.error(f"Server error {error_id}: {e}", exc_info=True)
         raise web.HTTPInternalServerError(
             text=f"An unexpected server error occurred: {error_id}") from e
+
+
+# ─── Audio Track Discovery API ────────────────────────────────────────────────
+
+
+@routes.get(r"/api/tracks/MRVIOLETSTREAMBOT-{path:.+}", allow_head=True)
+async def get_tracks(request: web.Request):
+    """Return available audio/video/subtitle tracks for a media file."""
+    try:
+        path = request.match_info["path"]
+        message_id, secure_hash = parse_media_request(path, request.query)
+
+        client_id, streamer = select_optimal_client()
+
+        # Get the message to validate hash and retrieve media
+        message = await streamer.get_message(message_id)
+        file_info = streamer.get_file_info_sync(message)
+
+        if not file_info.get('unique_id'):
+            raise FileNotFound("File unique ID not found.")
+
+        if file_info['unique_id'][:SECURE_HASH_LENGTH] != secure_hash:
+            raise InvalidHash("Hash mismatch.")
+
+        file_size = file_info.get('file_size', 0)
+        if file_size == 0:
+            raise FileNotFound("File size is zero.")
+
+        mime_type = file_info.get('mime_type', '') or ''
+
+        # Photos and non-video/audio files don't have audio tracks
+        if not mime_type.startswith(('video/', 'audio/')):
+            return web.json_response({
+                "video_tracks": [],
+                "audio_tracks": [],
+                "subtitle_tracks": [],
+                "has_multiple_audio": False
+            })
+
+        # Probe the file for tracks using the client
+        client = multi_clients[client_id]
+        tracks = await probe_tracks(client, message, file_size)
+
+        return web.json_response(tracks)
+
+    except (InvalidHash, FileNotFound) as e:
+        logger.debug(f"Track API error: {type(e).__name__} - {e}")
+        raise web.HTTPNotFound(text="Resource not found") from e
+    except Exception as e:
+        error_id = secrets.token_hex(6)
+        logger.error(f"Track API error {error_id}: {e}", exc_info=True)
+        raise web.HTTPInternalServerError(
+            text=f"Server error: {error_id}") from e
+
+
+# ─── FFmpeg Remux Streaming (Audio Track Switching) ───────────────────────────
+
+
+@routes.get(r"/remux/MRVIOLETSTREAMBOT-{path:.+}", allow_head=True)
+async def remux_delivery(request: web.Request):
+    """
+    Stream media through FFmpeg to select a specific audio track.
+    Remuxes (stream copy, no transcoding) video + selected audio into
+    fragmented MP4 for native browser playback.
+    """
+    try:
+        path = request.match_info["path"]
+        message_id, secure_hash = parse_media_request(path, request.query)
+
+        # Get audio track index from query param
+        try:
+            audio_track = int(request.query.get("audio", "0"))
+        except (ValueError, TypeError):
+            audio_track = 0
+
+        client_id, streamer = select_optimal_client()
+        work_loads[client_id] += 1
+
+        try:
+            message = await streamer.get_message(message_id)
+            file_info = streamer.get_file_info_sync(message)
+
+            if not file_info.get('unique_id'):
+                raise FileNotFound("File unique ID not found.")
+
+            if file_info['unique_id'][:SECURE_HASH_LENGTH] != secure_hash:
+                raise InvalidHash("Hash mismatch.")
+
+            file_size = file_info.get('file_size', 0)
+            if file_size == 0:
+                raise FileNotFound("File size is zero.")
+
+            filename = file_info.get('file_name') or f"file_{secrets.token_hex(4)}"
+            base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
+            remux_filename = f"{base_name}.mp4"
+
+            headers = {
+                "Content-Type": "video/mp4",
+                "Content-Disposition": (
+                    f"inline; filename*=UTF-8''{quote(remux_filename)}"),
+                "Cache-Control": "no-cache",
+                "Accept-Ranges": "none",
+                "Connection": "keep-alive"
+            }
+
+            if request.method == 'HEAD':
+                work_loads[client_id] -= 1
+                return web.Response(status=200, headers=headers)
+
+            client = multi_clients[client_id]
+
+            response = web.StreamResponse(status=200, headers=headers)
+            await response.prepare(request)
+
+            ffmpeg_cmd = [
+                'ffmpeg',
+                '-hide_banner',
+                '-loglevel', 'error',
+                '-i', 'pipe:0',
+                '-map', '0:v:0',
+                '-map', f'0:a:{audio_track}',
+                '-c', 'copy',
+                '-f', 'mp4',
+                '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+                'pipe:1'
+            ]
+
+            logger.info(
+                f"Starting FFmpeg remux: audio_track={audio_track}, "
+                f"file_size={file_size / 1024 / 1024:.1f}MB"
+            )
+
+            process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            async def feed_ffmpeg():
+                """Feed Telegram download data into FFmpeg stdin."""
+                bytes_fed = 0
+                try:
+                    async for chunk in client.stream_media(message):
+                        if not chunk:
+                            continue
+                        if process.poll() is not None:
+                            break
+                        await asyncio.to_thread(
+                            process.stdin.write, bytes(chunk)
+                        )
+                        bytes_fed += len(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                except Exception as e:
+                    logger.error(f"Remux feed error: {e}")
+                finally:
+                    try:
+                        if process.poll() is None:
+                            process.stdin.close()
+                    except Exception:
+                        pass
+                    logger.info(
+                        f"Feed complete: {bytes_fed / 1024 / 1024:.1f}MB "
+                        f"fed to FFmpeg"
+                    )
+
+            # Start feeding in background
+            feed_task = asyncio.create_task(feed_ffmpeg())
+
+            # Read FFmpeg stdout and write to response
+            read_size = 256 * 1024
+            bytes_sent = 0
+
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(
+                        process.stdout.read, read_size
+                    )
+                    if not chunk:
+                        break
+                    await response.write(chunk)
+                    bytes_sent += len(chunk)
+            except (ConnectionResetError, ConnectionAbortedError):
+                logger.info("Client disconnected during remux")
+            finally:
+                await feed_task
+
+                if process.poll() is None:
+                    try:
+                        process.kill()
+                        process.wait()
+                    except Exception:
+                        pass
+
+                work_loads[client_id] -= 1
+                logger.info(
+                    f"Remux complete: {bytes_sent / 1024 / 1024:.1f}MB sent"
+                )
+
+            await response.write_eof()
+            return response
+
+        except (FileNotFound, InvalidHash):
+            work_loads[client_id] -= 1
+            raise
+        except Exception as e:
+            work_loads[client_id] -= 1
+            error_id = secrets.token_hex(6)
+            logger.error(f"Remux error {error_id}: {e}", exc_info=True)
+            raise web.HTTPInternalServerError(
+                text=f"Server error during remux: {error_id}") from e
+
+    except (InvalidHash, FileNotFound) as e:
+        logger.debug(f"Remux client error: {type(e).__name__} - {e}")
+        raise web.HTTPNotFound(text="Resource not found") from e
+    except Exception as e:
+        error_id = secrets.token_hex(6)
+        logger.error(f"Remux server error {error_id}: {e}", exc_info=True)
+        raise web.HTTPInternalServerError(
+            text=f"Server error: {error_id}") from e

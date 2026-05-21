@@ -56,6 +56,29 @@
                 </video>
             </section>
 
+            <!-- Audio Track Selector -->
+            <section id="track-selector-container" class="track-selector-container" aria-label="Audio Track Selection" style="display:none; margin: 1rem 0;">
+                <div class="track-selector-bar" style="display:flex; align-items:center; gap:1rem; padding:0.75rem 1.25rem; background:rgba(255,255,255,0.05); backdrop-filter:blur(12px); border:1px solid rgba(255,255,255,0.1); border-radius:1rem;">
+                    <div class="track-icon" style="width:36px; height:36px; background:linear-gradient(135deg,#6366f1,#a855f7); border-radius:10px; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:0.9rem;">
+                        <i class="fas fa-language" aria-hidden="true"></i>
+                    </div>
+                    <div>
+                        <div class="track-label" style="font-size:0.8rem; color:rgba(255,255,255,0.5); text-transform:uppercase; letter-spacing:0.1em; white-space:nowrap;">Audio Track</div>
+                    </div>
+                    <select id="audio-track-select" aria-label="Select audio track" style="flex:1; min-width:0; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.15); color:white; padding:0.5rem 2rem 0.5rem 0.75rem; border-radius:0.5rem; font-size:0.9rem; cursor:pointer; outline:none;">
+                        <option value="-1">Loading tracks...</option>
+                    </select>
+                    <span id="track-badge" style="display:none; padding:0.2rem 0.6rem; background:rgba(99,102,241,0.15); color:#818cf8; border-radius:0.4rem; font-size:0.75rem; font-weight:600;">
+                        <i class="fas fa-check-circle"></i>
+                        <span id="track-badge-text">Default</span>
+                    </span>
+                </div>
+                <div id="remux-notice" style="display:none; margin-top:0.5rem; padding:0.6rem 1rem; background:rgba(234,179,8,0.08); border:1px solid rgba(234,179,8,0.15); border-radius:0.75rem; font-size:0.8rem; color:rgba(234,179,8,0.8); align-items:center; gap:0.5rem;">
+                    <i class="fas fa-info-circle"></i>
+                    <span>Playing with selected audio track via remux. Seeking may be limited.</span>
+                </div>
+            </section>
+
             <nav class="controls-section" aria-label="File options">
                 <div class="dropdown-container" id="stream-dropdown-container">
                     <button type="button" class="action-button button-base secondary-button stream-btn" aria-haspopup="true" aria-expanded="false" aria-controls="stream-menu" id="stream-btn-label">
@@ -148,5 +171,110 @@
 
     <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js" defer></script>
     <script src="https://cdn.jsdelivr.net/gh/fyaz05/Resources@main/FileToLink/script.js" defer></script>
+    <script>
+    // ─── Multi Audio Track Feature ───────────────────────────────────────────
+    (function() {
+        const ORIGINAL_SRC = '{{ src }}';
+        const TRACKS_API_URL = '{{ src }}'.replace(/^(https?:\/\/[^\/]+)\//, '$1/api/tracks/');
+        const REMUX_BASE_URL = '{{ src }}'.replace(/^(https?:\/\/[^\/]+)\//, '$1/remux/');
+        let currentAudioTrack = -1;
+        let tracksData = null;
+
+        async function loadTracks() {
+            try {
+                const resp = await fetch(TRACKS_API_URL);
+                if (!resp.ok) return;
+
+                tracksData = await resp.json();
+                const audioTracks = tracksData.audio_tracks || [];
+
+                if (audioTracks.length <= 1) return;
+                if (!tracksData.has_multiple_audio) return;
+
+                // Show the track selector
+                const container = document.getElementById('track-selector-container');
+                if (!container) return;
+                container.style.display = 'block';
+
+                const select = document.getElementById('audio-track-select');
+                select.innerHTML = '';
+
+                // Add default option
+                const defaultOpt = document.createElement('option');
+                defaultOpt.value = '-1';
+                defaultOpt.textContent = '\u25B6 Original Stream (Direct, Full Speed)';
+                select.appendChild(defaultOpt);
+
+                // Add each audio track
+                audioTracks.forEach(function(track, idx) {
+                    const opt = document.createElement('option');
+                    opt.value = track.audio_index;
+                    opt.textContent = track.label || ('Track ' + (idx + 1));
+                    select.appendChild(opt);
+                });
+
+                // Show badge
+                const badge = document.getElementById('track-badge');
+                if (badge) {
+                    badge.style.display = 'inline-flex';
+                    const badgeText = document.getElementById('track-badge-text');
+                    if (badgeText) badgeText.textContent = audioTracks.length + ' available';
+                }
+
+                // Listen for changes
+                select.addEventListener('change', function() {
+                    switchAudioTrack(parseInt(this.value));
+                });
+            } catch (err) {
+                console.error('Track loading error:', err);
+            }
+        }
+
+        function switchAudioTrack(audioIndex) {
+            if (audioIndex === currentAudioTrack) return;
+
+            const video = document.querySelector('#player');
+            const source = video ? video.querySelector('source') : null;
+            const notice = document.getElementById('remux-notice');
+            if (!video || !source) return;
+
+            const currentTime = video.currentTime || 0;
+            const wasPlaying = !video.paused;
+
+            if (audioIndex === -1) {
+                source.src = ORIGINAL_SRC;
+                source.type = 'video/mp4';
+                if (notice) notice.style.display = 'none';
+            } else {
+                source.src = REMUX_BASE_URL + '?audio=' + audioIndex;
+                source.type = 'video/mp4';
+                if (notice) notice.style.display = 'flex';
+            }
+
+            currentAudioTrack = audioIndex;
+            video.load();
+
+            if (audioIndex === -1 && currentTime > 0) {
+                video.addEventListener('loadedmetadata', function onLoad() {
+                    video.currentTime = currentTime;
+                    if (wasPlaying) video.play();
+                    video.removeEventListener('loadedmetadata', onLoad);
+                });
+            } else {
+                video.addEventListener('canplay', function onCanPlay() {
+                    if (wasPlaying) video.play();
+                    video.removeEventListener('canplay', onCanPlay);
+                });
+            }
+        }
+
+        // Load tracks when DOM is ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', loadTracks);
+        } else {
+            loadTracks();
+        }
+    })();
+    </script>
 </body>
 </html>
